@@ -1,0 +1,53 @@
+.
+├── app_config.py
+├── cad_kernel.py
+├── CHANGELOG.md
+├── cpd_engine.py
+├── CPD-main
+│   ├── config.yml
+│   ├── readme.txt
+│   ├── run_cpd
+│   ├── setup
+│   └── source
+├── CPD-SimStudio.desktop
+├── dependency_dialog.py
+├── dev_watch.py
+├── geometry_utils.py
+├── gmsh_mesher.py
+├── importers.py
+├── launch_cpd.sh
+├── LICENSE
+├── main_window.py
+├── mesh_utils.py
+├── models.py
+├── panels.py
+├── plugin_manager.py
+├── point_cloud_view.py
+├── project_schema.py
+├── project_stages.py
+├── project_tree.py
+├── quick_start_dialog.py
+├── README.md
+├── requirements.txt
+├── save_up_to_dialog.py
+├── scripts
+│   ├── build_linux.sh
+│   ├── build_windows.ps1
+│   ├── cpd_simstudio_linux.spec
+│   └── cpd_simstudio_windows.spec
+├── sketch_view.py
+├── solver_backends.py
+├── stage_bar.py
+├── startup_dialog.py
+├── structure.txt
+├── TESTER_README.md
+├── TEST_RUN_GUIDE.md
+├── ui
+│   ├── __init__.py
+│   └── validation
+├── ui_icons.py
+├── ui_theme.py
+├── update_checker.py
+└── viewport_3d.py
+
+7 directories, 44 files

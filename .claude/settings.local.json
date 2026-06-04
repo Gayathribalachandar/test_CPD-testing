@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast,sys; ast.parse\\(open\\('sketch_view.py',encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('app_config.py',encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python -c \"import app_config; print\\('app_config.SCENE_EXTENT =', app_config.SCENE_EXTENT\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('panels.py',encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('panels.py',encoding='utf-8'\\).read\\(\\)\\); import panels; print\\('ok'\\)\")",
+      "Bash(python -c \"import gmsh; print\\('gmsh', gmsh.__version__ if hasattr\\(gmsh, '__version__'\\) else 'ok'\\)\")",
+      "Bash(python -m pytest tests/test_heterogeneous_mesh.py -v)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('gmsh_mesher.py','r',encoding='utf-8'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('sketch_view.py', encoding='utf-8'\\).read\\(\\)\\); print\\('sketch_view.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('panels.py', encoding='utf-8'\\).read\\(\\)\\); print\\('panels.py OK'\\)\")"
+    ]
+  }
+}

@@ -1,0 +1,129 @@
+name: Nightly Pre-Release Binaries
+
+on:
+  push:
+    branches: ["main", "master"]
+  schedule:
+    # Daily run in UTC.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-prerelease
+  cancel-in-progress: true
+
+jobs:
+  build-linux-nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libdbus-1-3 \
+            gmsh \
+            libglu1-mesa
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Linux artifact
+        run: |
+          chmod +x scripts/build_linux.sh
+          ./scripts/build_linux.sh
+
+      - name: Package Linux nightly zip
+        run: |
+          mkdir -p releases
+          cd dist
+          zip -r ../releases/CPD-SimStudio-linux-nightly.zip CPD-SimStudio-linux/CPD-SimStudio
+
+      - name: Upload Linux nightly zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-linux-zip
+          path: releases/CPD-SimStudio-linux-nightly.zip
+          if-no-files-found: error
+
+  build-windows-nightly:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Windows artifact
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+
+      - name: Prepare Windows nightly zip name
+        run: |
+          if (!(Test-Path "releases\CPD-SimStudio-win.zip")) {
+            throw "Expected zip not found: releases\CPD-SimStudio-win.zip"
+          }
+          Copy-Item "releases\CPD-SimStudio-win.zip" "releases\CPD-SimStudio-win-nightly.zip" -Force
+
+      - name: Upload Windows nightly zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-windows-zip
+          path: releases/CPD-SimStudio-win-nightly.zip
+          if-no-files-found: error
+
+  publish-nightly:
+    runs-on: ubuntu-latest
+    needs: [build-linux-nightly, build-windows-nightly]
+    steps:
+      - name: Checkout (full history for tag update)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download nightly artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-*-zip
+          path: release-assets
+          merge-multiple: true
+
+      - name: Move nightly tag to current commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly "${GITHUB_SHA}"
+          git push origin refs/tags/nightly --force
+
+      - name: Build release metadata
+        id: meta
+        run: |
+          echo "date_utc=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling nightly pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly Build (rolling)
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.zip
+          body: |
+            Automated rolling nightly pre-release.
+            Updated: ${{ steps.meta.outputs.date_utc }}
+            Commit: ${{ github.sha }}
+            Trigger: ${{ github.event_name }}

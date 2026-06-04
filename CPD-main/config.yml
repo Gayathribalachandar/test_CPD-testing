@@ -1,0 +1,19 @@
+simulation:
+  time_step: 1.0e-08
+  total_steps: 1000
+  write_every_steps: 15
+  device: cpu
+  gravity: 0.0
+  area_eps: 1.0e-14
+time_profiles:
+  forces: []
+  velocities:
+  - id: 1
+    segments:
+    - t0: 0.0
+      t1: 0.0001
+      vx: '1.00'
+      vy: '0'
+      vz: '0'
+  unit_scale_to_m: 0.001
+  unit: m

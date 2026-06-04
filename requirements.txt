@@ -1,0 +1,31 @@
+# Core GUI + data stack
+PySide6>=6.5
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+PyYAML>=6.0
+shapely>=2.0
+
+# Visualization and previews
+pyqtgraph>=0.13
+PyOpenGL>=3.1
+matplotlib>=3.7
+
+# Solver acceleration/runtime
+numba>=0.57
+
+# Geometry importers
+ezdxf>=1.1
+svgpathtools>=1.6
+
+# Required mesh backend
+triangle
+gmsh>=4.11         # 3D volumetric connection generation/preview
+
+# Testing
+pytest>=7.0        # Unit test framework
+
+# Optional packages (install only if needed)
+# OCP>=0.1           # CAD kernel backend (OpenCASCADE Python bindings)
+# cupy-cuda12x       # GPU solver backend; match your local CUDA version
+# pygalmesh          # Optional connection backend

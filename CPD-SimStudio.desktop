@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CPD SimStudio
+Comment=Launch CPD SimStudio
+Exec=/home/ed317iitm/Dropbox/CPD-Modeller/CPD-SIM-UI/launch_cpd.sh
+Path=/home/ed317iitm/Dropbox/CPD-Modeller/CPD-SIM-UI
+Terminal=false
+Categories=Engineering;Science;

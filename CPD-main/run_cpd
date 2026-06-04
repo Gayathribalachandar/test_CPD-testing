@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+# Stop if any command fails
+set -e
+
+echo "Running the simulation..."
+python3 source/run_cpd.py
+
+echo "Simulation finished. Animating..."
+python3 source/animate_cpd.py
+
+echo "Done."

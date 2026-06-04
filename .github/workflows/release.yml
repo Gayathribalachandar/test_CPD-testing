@@ -1,0 +1,78 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Linux artifact
+        run: |
+          chmod +x scripts/build_linux.sh
+          ./scripts/build_linux.sh
+
+      - name: Package Linux zip
+        run: |
+          mkdir -p releases
+          cd dist
+          zip -r ../releases/CPD-SimStudio-linux.zip CPD-SimStudio-linux/CPD-SimStudio
+
+      - name: Upload Linux release zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: releases/CPD-SimStudio-linux.zip
+          if-no-files-found: error
+
+  build-windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Windows artifact
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+
+      - name: Upload Windows release zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: releases/CPD-SimStudio-win.zip
+          if-no-files-found: error
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [build-linux-release, build-windows-release]
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/*.zip
+          generate_release_notes: true
