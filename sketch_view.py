@@ -9087,13 +9087,23 @@ class SketchView(QGraphicsView):
     def cut_hole(self, hole_name_base=None, skip_undo=False, merge_voids=None):
         """
         Create a hole/cavity in the current solid.
-        This operation cuts through ALL intersecting parts by creating
-        a new nested 'void' part for each affected solid.
+
+        Normal cut (merge_voids=False / default):
+            The hole is subtracted DIRECTLY from each affected solid part's
+            Shapely geometry via ``difference()``.  The result is a single
+            part whose polygon contains the hole as an interior ring — no
+            separate void Part is created, so the project tree still shows
+            only the original part count.
+
+        Porous-feature cut (merge_voids=True):
+            Legacy behaviour kept for the porous-feature dialog.  A single
+            merged void child Part is created per affected solid, exactly as
+            before.
         """
         if not self.parts:
             QMessageBox.warning(self, "Error", "Create a main part first.")
             return False
-        
+
         sketches_copy = copy.deepcopy(self.sketches or [])
         meta_copy = copy.deepcopy(self.sketch_meta or [])
         dims_copy = copy.deepcopy(self.dimensions or [])
@@ -9103,48 +9113,50 @@ class SketchView(QGraphicsView):
         if holes_geom is None or holes_geom.is_empty:
             QMessageBox.warning(self, "Error", "No valid sketches to cut.")
             return False
-        
-        if hole_name_base is None:
-            hole_name_base = self._porous_sketch_name
+
+        # Resolve merge_voids: only True when called from the porous-feature
+        # dialog (which passes merge_voids=True or sets _porous_sketch_name).
         if merge_voids is None:
             merge_voids = bool(self._porous_sketch_name)
-        if not hole_name_base:
-            hole_name_base, ok = QInputDialog.getText(
-                None, "Cut/Hole Name", 
-                f"Enter base name for this cut operation (e.g., 'Main Cut'):",
-                text=f"Cut {len([p for p in self.parts if p.is_void]) + 1}"
-            )
-            if not ok or not hole_name_base.strip():
-                return False
-        hole_name_base = hole_name_base.strip()
 
         if not skip_undo:
             self.push_undo_state()
-        
-        # Find all solid parts that the new hole sketch intersects
+
+        # Find all solid parts that the hole sketch intersects.
         affected_parts = [
-            p for p in self.parts 
+            p for p in self.parts
             if not p.is_void and p.geometry and p.geometry.intersects(holes_geom)
         ]
-        
+
         if not affected_parts:
             QMessageBox.warning(self, "Warning", "The hole does not intersect with any existing solid parts.")
             return False
 
-        parts_added_count = 0
-        for existing_part in affected_parts:
-            # The geometry of this specific void is the intersection of the
-            # hole sketch and the part it's cutting. This ensures the void
-            # is confined to the boundary of the parent part.
-            try:
-                void_geom = existing_part.geometry.intersection(holes_geom)
-            except Exception:
-                void_geom = None
+        if merge_voids:
+            # ------------------------------------------------------------------
+            # Porous-feature path (legacy): create a single merged void child
+            # Part per affected solid so the feature dialog can track it.
+            # ------------------------------------------------------------------
+            if hole_name_base is None:
+                hole_name_base = self._porous_sketch_name
+            if not hole_name_base:
+                hole_name_base, ok = QInputDialog.getText(
+                    None, "Cut/Hole Name",
+                    "Enter base name for this cut operation (e.g., 'Main Cut'):",
+                    text=f"Cut {len([p for p in self.parts if p.is_void]) + 1}",
+                )
+                if not ok or not hole_name_base.strip():
+                    return False
+            hole_name_base = hole_name_base.strip()
 
-            if void_geom is None or void_geom.is_empty:
-                continue
-
-            if merge_voids:
+            parts_added_count = 0
+            for existing_part in affected_parts:
+                try:
+                    void_geom = existing_part.geometry.intersection(holes_geom)
+                except Exception:
+                    void_geom = None
+                if void_geom is None or void_geom.is_empty:
+                    continue
                 hole_part_name = (
                     hole_name_base
                     if len(affected_parts) == 1
@@ -9161,32 +9173,56 @@ class SketchView(QGraphicsView):
                 self.parts.append(hole_part)
                 parts_added_count += 1
                 print(f"Created void part '{hole_part_name}' inside '{existing_part.name}'")
-                continue
 
-            geoms = [void_geom] if isinstance(void_geom, Polygon) else list(void_geom.geoms)
-            for geom in geoms:
-                if geom is None or geom.is_empty:
-                    continue
-                hole_part_name = f"{hole_name_base} (in {existing_part.name})"
-                hole_part = Part(hole_part_name, geometry=geom, is_void=True)
-                hole_part.parent_id = existing_part.id
-                hole_part.sketches = copy.deepcopy(sketches_copy)
-                hole_part.sketch_meta = copy.deepcopy(meta_copy)
-                hole_part.dimensions = copy.deepcopy(dims_copy)
-                hole_part.constraints = copy.deepcopy(cons_copy)
-                hole_part.storage_units = "ui"
-                self._sync_cad_shape(hole_part)
-                
-                self.parts.append(hole_part)
-                parts_added_count += 1
-                print(f"Created void part '{hole_part_name}' inside '{existing_part.name}'")
+            if parts_added_count > 0:
+                self.rebuild_display_geometry()
+                self.partsChanged.emit()
+                QMessageBox.information(
+                    self, "Success",
+                    f"Cut operation created {parts_added_count} void(s) in intersecting parts.",
+                )
+            else:
+                QMessageBox.warning(self, "Warning", "Cut operation did not result in any geometric changes.")
 
-        if parts_added_count > 0:
-            self.rebuild_display_geometry()
-            self.partsChanged.emit()
-            QMessageBox.information(self, "Success", f"Cut operation created {parts_added_count} void(s) in intersecting parts.")
+            result = parts_added_count > 0
+
         else:
-            QMessageBox.warning(self, "Warning", "Cut operation did not result in any geometric changes.")
+            # ------------------------------------------------------------------
+            # Normal cut path: subtract the hole geometry directly from each
+            # affected solid part.  The Shapely ``difference()`` produces a
+            # polygon whose interior rings represent the holes, so the result
+            # is still ONE part — no new Part object is added to self.parts.
+            # All downstream code (_extract_part_loops_for_gmsh,
+            # rebuild_display_geometry, _iter_part_edges) already handles
+            # Shapely polygons with interior rings correctly.
+            # ------------------------------------------------------------------
+            parts_modified_count = 0
+            for existing_part in affected_parts:
+                try:
+                    new_geom = existing_part.geometry.difference(holes_geom).buffer(0)
+                except Exception:
+                    continue
+                if new_geom is None or new_geom.is_empty:
+                    continue
+                existing_part.geometry = new_geom
+                # Mark as directly edited so sketch-rebuild doesn't overwrite
+                # the holed geometry with the original exterior-only sketch.
+                existing_part.is_direct_edit = True
+                self._sync_cad_shape(existing_part)
+                parts_modified_count += 1
+                print(f"Cut hole directly into part '{existing_part.name}'")
+
+            if parts_modified_count > 0:
+                self.rebuild_display_geometry()
+                self.partsChanged.emit()
+                QMessageBox.information(
+                    self, "Success",
+                    f"Hole cut into {parts_modified_count} part(s).",
+                )
+            else:
+                QMessageBox.warning(self, "Warning", "Cut operation did not result in any geometric changes.")
+
+            result = parts_modified_count > 0
 
         self.sketches.clear()
         self.sketch_meta.clear()
@@ -9195,7 +9231,7 @@ class SketchView(QGraphicsView):
         self._porous_sketch_name = None
         self.restore_default_sketch_tool()
         self.redraw()
-        return parts_added_count > 0
+        return result
 
     def apply_sketch_feature_to_selected_part(self, op_type):
         if self.selected_part_id is None:
@@ -16644,15 +16680,16 @@ class SketchView(QGraphicsView):
                         return
                     if self.tool == "rectangle" and self.mode == "idle":
                         if self._rect_use_dimensions:
-                            params = self._prompt_rect_params()
+                            params = self._prompt_rect_params(default_pt=pt)
                             if params:
-                                width, height = params
+                                start_x, start_y, width, height = params
+                                start_pt = (start_x, start_y)
                                 if self._rect_draw_mode == "center":
-                                    end = (pt[0] + width / 2.0, pt[1] + height / 2.0)
+                                    end = (start_x + width / 2.0, start_y + height / 2.0)
                                 else:
-                                    end = (pt[0] + width, pt[1] + height)
-                                self.current = [pt]
-                                self._pending_rectangle_start = pt
+                                    end = (start_x + width, start_y + height)
+                                self.current = [start_pt]
+                                self._pending_rectangle_start = start_pt
                                 self._finalize_shape(end)
                                 return
                             return
@@ -16665,22 +16702,28 @@ class SketchView(QGraphicsView):
                             self._announce_status("Rectangle (2-corner): click first corner, then opposite corner.")
                         return
                     if self.tool == "circle" and self.mode == "idle" and self._circle_draw_mode == "radius":
-                        radius = self._prompt_circle_radius()
-                        if radius is not None:
-                            end = (pt[0] + radius, pt[1])
-                            self.current = [pt]
+                        params = self._prompt_circle_radius(default_pt=pt)
+                        if params is not None:
+                            center_x, center_y, radius = params
+                            center_pt = (center_x, center_y)
+                            end = (center_x + radius, center_y)
+                            self.current = [center_pt]
                             self._finalize_shape(end)
                         return
+                    # Line always uses the coordinate dialog — the user must enter
+                    # both start and end explicitly, regardless of parametric_enabled.
+                    if self.tool == "line" and self.mode == "idle":
+                        params = self._prompt_line_params(default_pt=pt)
+                        if params:
+                            start = params["start"]
+                            end = params["end"]
+                            self.current = [start]
+                            self._finalize_shape(end)
+                        # Whether the user accepted or cancelled, do not fall
+                        # through to the generic 2-click drawing path.
+                        return
                     if self.parametric_enabled and self.mode == "idle":
-                        if self.tool == "line":
-                            params = self._prompt_line_params()
-                            if params:
-                                start = params["start"]
-                                end = params["end"]
-                                self.current = [start]
-                                self._finalize_shape(end)
-                                return
-                        elif self.tool == "slot":
+                        if self.tool == "slot":
                             params = self._prompt_slot_params()
                             if params:
                                 length, angle, width = params
@@ -16721,12 +16764,20 @@ class SketchView(QGraphicsView):
                 if self.tool == "polygon":
                     if self.mode == "idle":
                         if self.parametric_enabled:
-                            params = self._prompt_polygon_params()
+                            params = self._prompt_polygon_params(default_pt=pt)
                             if params:
-                                sides, radius = params
+                                center_x, center_y, sides, radius, angle_deg = params
                                 self.polygon_sides = sides
-                                end = (pt[0] + radius, pt[1])
-                                self.current = [pt]
+                                center_pt = (center_x, center_y)
+                                # Translate the user-supplied orientation angle
+                                # into the direction of the first vertex so that
+                                # _finalize_shape derives the correct rotation.
+                                angle_rad = math.radians(angle_deg)
+                                end = (
+                                    center_x + radius * math.cos(angle_rad),
+                                    center_y + radius * math.sin(angle_rad),
+                                )
+                                self.current = [center_pt]
                                 self._finalize_shape(end)
                                 return
                         n, ok = QInputDialog.getInt(
@@ -18882,23 +18933,35 @@ class SketchView(QGraphicsView):
         menu.exec(global_pos)
         menu.close()
 
-    def _prompt_line_params(self):
+    def _prompt_line_params(self, default_pt=None):
         """Show a dialog asking for start (X1, Y1) and end (X2, Y2) coordinates
         to create a line.  Returns a dict ``{'start': (x1, y1), 'end': (x2, y2)}``
-        on acceptance, or ``None`` if the user cancels."""
+        on acceptance, or ``None`` if the user cancels.
+
+        ``default_pt`` — optional (x, y) tuple used to pre-fill the start-point
+        spinboxes (usually the canvas click-point so the user can simply confirm
+        or fine-tune the value without retyping it).
+        """
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Create Line — Enter Coordinates")
-        dialog.setMinimumWidth(340)
+        dialog.setMinimumWidth(360)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        unit = getattr(self, "current_unit", "mm")
-        default_val = self._practical_sketch_default(200.0)
+        unit = getattr(self, "current_unit", "mm") or "mm"
+        default_offset = self._practical_sketch_default(200.0)
+
+        # Pre-fill start from click position when available; otherwise 0, 0.
+        default_x1 = float(default_pt[0]) if default_pt is not None else 0.0
+        default_y1 = float(default_pt[1]) if default_pt is not None else 0.0
+        # End-point default: same Y as start, offset by a practical distance in X.
+        default_x2 = default_x1 + default_offset
+        default_y2 = default_y1
 
         # --- header label ---
-        header = QLabel(f"Define line by start and end coordinates ({unit})")
+        header = QLabel(f"Create Line  ·  start and end coordinates  ({unit})")
         header.setStyleSheet("font-weight: 700; font-size: 13px; color: #1a1f29;")
         layout.addWidget(header)
 
@@ -18911,7 +18974,7 @@ class SketchView(QGraphicsView):
         spin_x1 = QDoubleSpinBox()
         spin_x1.setRange(-1e9, 1e9)
         spin_x1.setDecimals(4)
-        spin_x1.setValue(0.0)
+        spin_x1.setValue(default_x1)
         spin_x1.setMinimumHeight(30)
         spin_x1.setToolTip("X coordinate of the start point")
         start_form.addRow(f"X₁ ({unit}):", spin_x1)
@@ -18919,7 +18982,7 @@ class SketchView(QGraphicsView):
         spin_y1 = QDoubleSpinBox()
         spin_y1.setRange(-1e9, 1e9)
         spin_y1.setDecimals(4)
-        spin_y1.setValue(0.0)
+        spin_y1.setValue(default_y1)
         spin_y1.setMinimumHeight(30)
         spin_y1.setToolTip("Y coordinate of the start point")
         start_form.addRow(f"Y₁ ({unit}):", spin_y1)
@@ -18935,7 +18998,7 @@ class SketchView(QGraphicsView):
         spin_x2 = QDoubleSpinBox()
         spin_x2.setRange(-1e9, 1e9)
         spin_x2.setDecimals(4)
-        spin_x2.setValue(default_val)
+        spin_x2.setValue(default_x2)
         spin_x2.setMinimumHeight(30)
         spin_x2.setToolTip("X coordinate of the end point")
         end_form.addRow(f"X₂ ({unit}):", spin_x2)
@@ -18943,7 +19006,7 @@ class SketchView(QGraphicsView):
         spin_y2 = QDoubleSpinBox()
         spin_y2.setRange(-1e9, 1e9)
         spin_y2.setDecimals(4)
-        spin_y2.setValue(0.0)
+        spin_y2.setValue(default_y2)
         spin_y2.setMinimumHeight(30)
         spin_y2.setToolTip("Y coordinate of the end point")
         end_form.addRow(f"Y₂ ({unit}):", spin_y2)
@@ -18996,30 +19059,128 @@ class SketchView(QGraphicsView):
 
         return {"start": start, "end": end}
 
-    def _prompt_rect_params(self):
-        width, ok = QInputDialog.getDouble(
-            self,
-            "Rectangle Width",
-            f"Width ({self.current_unit}):",
-            self._practical_sketch_default(300.0),
-            -1e9,
-            1e9,
-            3,
+    def _prompt_rect_params(self, default_pt=None):
+        """Show a dialog asking for the starting position, width, and height of a
+        rectangle.  Returns ``(start_x, start_y, width, height)`` on acceptance,
+        or ``None`` if the user cancels.
+
+        ``default_pt`` — optional (x, y) tuple used as the pre-filled starting
+        position (usually the canvas click-point so the user only has to adjust
+        if they want a different origin).
+        """
+        dialog = QDialog(self)
+        mode_label = "center" if self._rect_draw_mode == "center" else "corner"
+        dialog.setWindowTitle("Create Rectangle — Enter Dimensions")
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        unit = getattr(self, "current_unit", "mm") or "mm"
+
+        header = QLabel(
+            f"Rectangle  ·  {mode_label} mode  ({unit})"
         )
-        if not ok:
-            return None
-        height, ok = QInputDialog.getDouble(
-            self,
-            "Rectangle Height",
-            f"Height ({self.current_unit}):",
-            self._practical_sketch_default(200.0),
-            -1e9,
-            1e9,
-            3,
+        header.setStyleSheet("font-weight: 700; font-size: 13px; color: #1a1f29;")
+        layout.addWidget(header)
+
+        # ── Starting position ──────────────────────────────────────────────
+        pos_group = QGroupBox(
+            "Starting Position (Center)" if self._rect_draw_mode == "center"
+            else "Starting Position (Corner)"
         )
-        if not ok:
+        pos_form = QFormLayout(pos_group)
+        pos_form.setContentsMargins(10, 14, 10, 8)
+        pos_form.setSpacing(8)
+
+        default_x = float(default_pt[0]) if default_pt is not None else 0.0
+        default_y = float(default_pt[1]) if default_pt is not None else 0.0
+
+        spin_x = QDoubleSpinBox()
+        spin_x.setRange(-1e9, 1e9)
+        spin_x.setDecimals(4)
+        spin_x.setValue(default_x)
+        spin_x.setMinimumHeight(30)
+        spin_x.setToolTip(
+            "X coordinate of the rectangle center"
+            if self._rect_draw_mode == "center"
+            else "X coordinate of the top-left corner"
+        )
+        pos_form.addRow(f"X ({unit}):", spin_x)
+
+        spin_y = QDoubleSpinBox()
+        spin_y.setRange(-1e9, 1e9)
+        spin_y.setDecimals(4)
+        spin_y.setValue(default_y)
+        spin_y.setMinimumHeight(30)
+        spin_y.setToolTip(
+            "Y coordinate of the rectangle center"
+            if self._rect_draw_mode == "center"
+            else "Y coordinate of the top-left corner"
+        )
+        pos_form.addRow(f"Y ({unit}):", spin_y)
+
+        layout.addWidget(pos_group)
+
+        # ── Dimensions ────────────────────────────────────────────────────
+        dim_group = QGroupBox("Dimensions")
+        dim_form = QFormLayout(dim_group)
+        dim_form.setContentsMargins(10, 14, 10, 8)
+        dim_form.setSpacing(8)
+
+        spin_w = QDoubleSpinBox()
+        spin_w.setRange(1e-9, 1e9)
+        spin_w.setDecimals(4)
+        spin_w.setValue(self._practical_sketch_default(300.0))
+        spin_w.setMinimumHeight(30)
+        spin_w.setToolTip("Width of the rectangle")
+        dim_form.addRow(f"Width ({unit}):", spin_w)
+
+        spin_h = QDoubleSpinBox()
+        spin_h.setRange(1e-9, 1e9)
+        spin_h.setDecimals(4)
+        spin_h.setValue(self._practical_sketch_default(200.0))
+        spin_h.setMinimumHeight(30)
+        spin_h.setToolTip("Height of the rectangle")
+        dim_form.addRow(f"Height ({unit}):", spin_h)
+
+        layout.addWidget(dim_group)
+
+        # ── Preview label ─────────────────────────────────────────────────
+        preview_label = QLabel()
+        preview_label.setStyleSheet(
+            "color: #5f6b76; font-size: 11px; padding: 4px 0px;"
+        )
+
+        def _update_preview():
+            x = spin_x.value()
+            y = spin_y.value()
+            w = spin_w.value()
+            h = spin_h.value()
+            if self._rect_draw_mode == "center":
+                preview_label.setText(
+                    f"Center: ({x:.3f}, {y:.3f})   Size: {w:.3f} × {h:.3f} {unit}"
+                )
+            else:
+                preview_label.setText(
+                    f"Corner: ({x:.3f}, {y:.3f})   Size: {w:.3f} × {h:.3f} {unit}"
+                )
+
+        for sp in (spin_x, spin_y, spin_w, spin_h):
+            sp.valueChanged.connect(lambda _: _update_preview())
+        _update_preview()
+        layout.addWidget(preview_label)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec() != QDialog.Accepted:
             return None
-        return width, height
+
+        return spin_x.value(), spin_y.value(), spin_w.value(), spin_h.value()
 
     def _prompt_rectangle_mode(self):
         options = [
@@ -19047,19 +19208,100 @@ class SketchView(QGraphicsView):
         use_dims = "dimensions" in choice
         return mode, use_dims
 
-    def _prompt_circle_radius(self):
-        radius, ok = QInputDialog.getDouble(
-            self,
-            "Circle Radius",
-            f"Radius ({self.current_unit}):",
-            self._practical_sketch_default(150.0),
-            0.0,
-            1e9,
-            3,
+    def _prompt_circle_radius(self, default_pt=None):
+        """Show a dialog asking for the center position and radius of a circle.
+        Returns ``(center_x, center_y, radius)`` on acceptance, or ``None`` if
+        the user cancels.
+
+        ``default_pt`` — optional (x, y) tuple pre-filled as the center
+        (usually the canvas click-point).
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create Circle — Enter Dimensions")
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        unit = getattr(self, "current_unit", "mm") or "mm"
+
+        header = QLabel(f"Circle  ·  center and radius  ({unit})")
+        header.setStyleSheet("font-weight: 700; font-size: 13px; color: #1a1f29;")
+        layout.addWidget(header)
+
+        # ── Center position ───────────────────────────────────────────────
+        center_group = QGroupBox("Center Position")
+        center_form = QFormLayout(center_group)
+        center_form.setContentsMargins(10, 14, 10, 8)
+        center_form.setSpacing(8)
+
+        default_x = float(default_pt[0]) if default_pt is not None else 0.0
+        default_y = float(default_pt[1]) if default_pt is not None else 0.0
+
+        spin_cx = QDoubleSpinBox()
+        spin_cx.setRange(-1e9, 1e9)
+        spin_cx.setDecimals(4)
+        spin_cx.setValue(default_x)
+        spin_cx.setMinimumHeight(30)
+        spin_cx.setToolTip("X coordinate of the circle center")
+        center_form.addRow(f"Center X ({unit}):", spin_cx)
+
+        spin_cy = QDoubleSpinBox()
+        spin_cy.setRange(-1e9, 1e9)
+        spin_cy.setDecimals(4)
+        spin_cy.setValue(default_y)
+        spin_cy.setMinimumHeight(30)
+        spin_cy.setToolTip("Y coordinate of the circle center")
+        center_form.addRow(f"Center Y ({unit}):", spin_cy)
+
+        layout.addWidget(center_group)
+
+        # ── Radius ────────────────────────────────────────────────────────
+        radius_group = QGroupBox("Dimensions")
+        radius_form = QFormLayout(radius_group)
+        radius_form.setContentsMargins(10, 14, 10, 8)
+        radius_form.setSpacing(8)
+
+        spin_r = QDoubleSpinBox()
+        spin_r.setRange(1e-9, 1e9)
+        spin_r.setDecimals(4)
+        spin_r.setValue(self._practical_sketch_default(150.0))
+        spin_r.setMinimumHeight(30)
+        spin_r.setToolTip("Radius of the circle (center to edge)")
+        radius_form.addRow(f"Radius ({unit}):", spin_r)
+
+        layout.addWidget(radius_group)
+
+        # ── Preview label ─────────────────────────────────────────────────
+        preview_label = QLabel()
+        preview_label.setStyleSheet(
+            "color: #5f6b76; font-size: 11px; padding: 4px 0px;"
         )
-        if not ok:
+
+        def _update_preview():
+            cx = spin_cx.value()
+            cy = spin_cy.value()
+            r = spin_r.value()
+            preview_label.setText(
+                f"Center: ({cx:.3f}, {cy:.3f})   "
+                f"Radius: {r:.4f} {unit}   Diameter: {2 * r:.4f} {unit}"
+            )
+
+        for sp in (spin_cx, spin_cy, spin_r):
+            sp.valueChanged.connect(lambda _: _update_preview())
+        _update_preview()
+        layout.addWidget(preview_label)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec() != QDialog.Accepted:
             return None
-        return radius
+
+        return spin_cx.value(), spin_cy.value(), spin_r.value()
 
     def _prompt_slot_params(self):
         length, ok = QInputDialog.getDouble(
@@ -19097,29 +19339,139 @@ class SketchView(QGraphicsView):
             return None
         return length, angle, width
 
-    def _prompt_polygon_params(self):
-        sides, ok = QInputDialog.getInt(
-            self,
-            "Polygon",
-            "Sides:",
-            self.polygon_sides,
-            3,
-            360,
+    def _prompt_polygon_params(self, default_pt=None):
+        """Show a dialog asking for the center position, number of sides,
+        circumradius, and orientation of a regular polygon.  Returns
+        ``(center_x, center_y, sides, radius, angle_deg)`` on acceptance,
+        or ``None`` if the user cancels.
+
+        ``default_pt`` — optional (x, y) tuple pre-filled as the polygon center
+        (usually the canvas click-point).
+
+        ``angle_deg`` is the rotation of the first vertex measured
+        counter-clockwise from the positive X-axis (0° = flat bottom edge for
+        even-sided polygons, first vertex pointing right).
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create Polygon — Enter Parameters")
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        unit = getattr(self, "current_unit", "mm") or "mm"
+
+        header = QLabel(f"Regular Polygon  ·  center, sides, radius, and orientation  ({unit})")
+        header.setStyleSheet("font-weight: 700; font-size: 13px; color: #1a1f29;")
+        layout.addWidget(header)
+
+        # ── Center position ───────────────────────────────────────────────
+        center_group = QGroupBox("Center Position")
+        center_form = QFormLayout(center_group)
+        center_form.setContentsMargins(10, 14, 10, 8)
+        center_form.setSpacing(8)
+
+        default_x = float(default_pt[0]) if default_pt is not None else 0.0
+        default_y = float(default_pt[1]) if default_pt is not None else 0.0
+
+        spin_cx = QDoubleSpinBox()
+        spin_cx.setRange(-1e9, 1e9)
+        spin_cx.setDecimals(4)
+        spin_cx.setValue(default_x)
+        spin_cx.setMinimumHeight(30)
+        spin_cx.setToolTip("X coordinate of the polygon center")
+        center_form.addRow(f"Center X ({unit}):", spin_cx)
+
+        spin_cy = QDoubleSpinBox()
+        spin_cy.setRange(-1e9, 1e9)
+        spin_cy.setDecimals(4)
+        spin_cy.setValue(default_y)
+        spin_cy.setMinimumHeight(30)
+        spin_cy.setToolTip("Y coordinate of the polygon center")
+        center_form.addRow(f"Center Y ({unit}):", spin_cy)
+
+        layout.addWidget(center_group)
+
+        # ── Shape parameters ──────────────────────────────────────────────
+        shape_group = QGroupBox("Shape Parameters")
+        shape_form = QFormLayout(shape_group)
+        shape_form.setContentsMargins(10, 14, 10, 8)
+        shape_form.setSpacing(8)
+
+        spin_sides = QSpinBox()
+        spin_sides.setRange(3, 360)
+        spin_sides.setValue(int(self.polygon_sides))
+        spin_sides.setMinimumHeight(30)
+        spin_sides.setToolTip("Number of sides of the regular polygon")
+        shape_form.addRow("Sides:", spin_sides)
+
+        spin_r = QDoubleSpinBox()
+        spin_r.setRange(1e-9, 1e9)
+        spin_r.setDecimals(4)
+        spin_r.setValue(self._practical_sketch_default(150.0))
+        spin_r.setMinimumHeight(30)
+        spin_r.setToolTip("Circumradius — distance from center to each vertex")
+        shape_form.addRow(f"Radius ({unit}):", spin_r)
+
+        # ── Orientation ───────────────────────────────────────────────────
+        spin_angle = QDoubleSpinBox()
+        spin_angle.setRange(-360.0, 360.0)
+        spin_angle.setDecimals(2)
+        spin_angle.setSingleStep(15.0)
+        spin_angle.setWrapping(True)          # wraps naturally at ±360°
+        spin_angle.setValue(0.0)
+        spin_angle.setMinimumHeight(30)
+        spin_angle.setToolTip(
+            "Rotation of the first vertex, measured counter-clockwise from the\n"
+            "positive X-axis (0° = first vertex pointing right).\n"
+            "Use 90° for a vertex pointing up, −30° / 330° for a flat-bottom\n"
+            "triangle, etc."
         )
-        if not ok:
-            return None
-        radius, ok = QInputDialog.getDouble(
-            self,
-            "Polygon Radius",
-            f"Radius ({self.current_unit}):",
-            self._practical_sketch_default(150.0),
-            0.0,
-            1e9,
-            3,
+        shape_form.addRow("Orientation (°):", spin_angle)
+
+        layout.addWidget(shape_group)
+
+        # ── Preview label ─────────────────────────────────────────────────
+        preview_label = QLabel()
+        preview_label.setStyleSheet(
+            "color: #5f6b76; font-size: 11px; padding: 4px 0px;"
         )
-        if not ok:
+
+        def _update_preview():
+            cx = spin_cx.value()
+            cy = spin_cy.value()
+            n = spin_sides.value()
+            r = spin_r.value()
+            ang = spin_angle.value()
+            apothem = r * math.cos(math.pi / n) if n > 0 else 0.0
+            preview_label.setText(
+                f"Center: ({cx:.3f}, {cy:.3f})   "
+                f"{n}-gon   Circumradius: {r:.4f}   Apothem: {apothem:.4f} {unit}"
+                f"   Orientation: {ang:.1f}°"
+            )
+
+        for sp in (spin_cx, spin_cy, spin_r, spin_angle):
+            sp.valueChanged.connect(lambda _: _update_preview())
+        spin_sides.valueChanged.connect(lambda _: _update_preview())
+        _update_preview()
+        layout.addWidget(preview_label)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec() != QDialog.Accepted:
             return None
-        return sides, radius
+
+        return (
+            spin_cx.value(),
+            spin_cy.value(),
+            spin_sides.value(),
+            spin_r.value(),
+            spin_angle.value(),
+        )
 
     def _erase_sketch_at(self, pt):
         for si, sketch in enumerate(self.sketches):
